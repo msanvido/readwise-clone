@@ -1,29 +1,29 @@
-import Database from "better-sqlite3";
-import path from "path";
-import fs from "fs";
+import { createClient, type Client, type InStatement, type ResultSet, type Row } from "@libsql/client";
 
-const DB_PATH = path.join(process.cwd(), "data", "readwise.db");
+let client: Client;
+let initialized = false;
 
-// Ensure data directory exists
-const dataDir = path.dirname(DB_PATH);
-if (!fs.existsSync(dataDir)) {
-  fs.mkdirSync(dataDir, { recursive: true });
-}
-
-let db: Database.Database;
-
-function getDb(): Database.Database {
-  if (!db) {
-    db = new Database(DB_PATH);
-    db.pragma("journal_mode = WAL");
-    db.pragma("foreign_keys = ON");
-    initializeDatabase(db);
+export function getClient(): Client {
+  if (!client) {
+    client = createClient({
+      url: process.env.TURSO_DATABASE_URL || "file:local.db",
+      authToken: process.env.TURSO_AUTH_TOKEN,
+    });
   }
-  return db;
+  return client;
 }
 
-function initializeDatabase(db: Database.Database) {
-  db.exec(`
+export async function getDb(): Promise<Client> {
+  const c = getClient();
+  if (!initialized) {
+    await initializeDatabase(c);
+    initialized = true;
+  }
+  return c;
+}
+
+async function initializeDatabase(client: Client) {
+  await client.executeMultiple(`
     CREATE TABLE IF NOT EXISTS users (
       id TEXT PRIMARY KEY,
       email TEXT UNIQUE NOT NULL,
@@ -31,6 +31,17 @@ function initializeDatabase(db: Database.Database) {
       password_hash TEXT NOT NULL,
       created_at TEXT DEFAULT (datetime('now')),
       updated_at TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS feeds (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      title TEXT NOT NULL,
+      url TEXT NOT NULL,
+      folder TEXT DEFAULT '',
+      last_fetched_at TEXT,
+      created_at TEXT DEFAULT (datetime('now')),
+      UNIQUE(user_id, url)
     );
 
     CREATE TABLE IF NOT EXISTS documents (
@@ -94,17 +105,6 @@ function initializeDatabase(db: Database.Database) {
       PRIMARY KEY (highlight_id, tag_id)
     );
 
-    CREATE TABLE IF NOT EXISTS feeds (
-      id TEXT PRIMARY KEY,
-      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      title TEXT NOT NULL,
-      url TEXT NOT NULL,
-      folder TEXT DEFAULT '',
-      last_fetched_at TEXT,
-      created_at TEXT DEFAULT (datetime('now')),
-      UNIQUE(user_id, url)
-    );
-
     CREATE TABLE IF NOT EXISTS daily_review_log (
       id TEXT PRIMARY KEY,
       user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -124,4 +124,22 @@ function initializeDatabase(db: Database.Database) {
   `);
 }
 
-export default getDb;
+// Helper: convert a Row to a plain object
+export function rowToObj(row: Row, columns: string[]): Record<string, unknown> {
+  const obj: Record<string, unknown> = {};
+  for (const col of columns) {
+    obj[col] = row[col];
+  }
+  return obj;
+}
+
+// Helper: convert a full ResultSet to array of plain objects
+export function rowsToObjects(rs: ResultSet): Record<string, unknown>[] {
+  return rs.rows.map(row => rowToObj(row, rs.columns));
+}
+
+// Helper: get first row as object or null
+export function firstRow(rs: ResultSet): Record<string, unknown> | null {
+  if (rs.rows.length === 0) return null;
+  return rowToObj(rs.rows[0], rs.columns);
+}

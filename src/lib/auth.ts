@@ -1,7 +1,7 @@
 import { SignJWT, jwtVerify } from "jose";
 import { cookies } from "next/headers";
 import bcrypt from "bcryptjs";
-import getDb from "./db";
+import { getDb, firstRow } from "./db";
 import { v4 as uuid } from "uuid";
 
 const JWT_SECRET = new TextEncoder().encode(
@@ -52,11 +52,14 @@ export async function getCurrentUser(): Promise<User | null> {
   const payload = await verifyToken(token);
   if (!payload) return null;
 
-  const db = getDb();
-  const user = db
-    .prepare("SELECT id, email, name, created_at FROM users WHERE id = ?")
-    .get(payload.userId) as User | undefined;
-  return user || null;
+  const db = await getDb();
+  const rs = await db.execute({
+    sql: "SELECT id, email, name, created_at FROM users WHERE id = ?",
+    args: [payload.userId],
+  });
+  const row = firstRow(rs);
+  if (!row) return null;
+  return row as unknown as User;
 }
 
 export async function createUser(
@@ -64,12 +67,13 @@ export async function createUser(
   name: string,
   password: string
 ): Promise<User> {
-  const db = getDb();
+  const db = await getDb();
   const id = uuid();
   const passwordHash = await hashPassword(password);
-  db.prepare(
-    "INSERT INTO users (id, email, name, password_hash) VALUES (?, ?, ?, ?)"
-  ).run(id, email, name, passwordHash);
+  await db.execute({
+    sql: "INSERT INTO users (id, email, name, password_hash) VALUES (?, ?, ?, ?)",
+    args: [id, email, name, passwordHash],
+  });
   return { id, email, name, created_at: new Date().toISOString() };
 }
 
@@ -77,14 +81,21 @@ export async function loginUser(
   email: string,
   password: string
 ): Promise<User | null> {
-  const db = getDb();
-  const row = db.prepare("SELECT * FROM users WHERE email = ?").get(email) as
-    | (User & { password_hash: string })
-    | undefined;
+  const db = await getDb();
+  const rs = await db.execute({
+    sql: "SELECT * FROM users WHERE email = ?",
+    args: [email],
+  });
+  const row = firstRow(rs);
   if (!row) return null;
 
-  const valid = await verifyPassword(password, row.password_hash);
+  const valid = await verifyPassword(password, row.password_hash as string);
   if (!valid) return null;
 
-  return { id: row.id, email: row.email, name: row.name, created_at: row.created_at };
+  return {
+    id: row.id as string,
+    email: row.email as string,
+    name: row.name as string,
+    created_at: row.created_at as string,
+  };
 }

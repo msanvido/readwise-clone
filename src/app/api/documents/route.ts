@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getCurrentUser } from "@/lib/auth";
-import getDb from "@/lib/db";
+import { getDb, rowsToObjects, firstRow } from "@/lib/db";
 import { parseUrl, countWords } from "@/lib/parser";
 import { v4 as uuid } from "uuid";
 
@@ -17,7 +17,7 @@ export async function GET(request: NextRequest) {
   const limit = parseInt(sp.get("limit") || "50");
   const offset = parseInt(sp.get("offset") || "0");
 
-  const db = getDb();
+  const db = await getDb();
   let where = "WHERE d.user_id = ?";
   const params: (string | number)[] = [user.id];
 
@@ -38,15 +38,19 @@ export async function GET(request: NextRequest) {
   const sortCol = allowedSorts.includes(sort) ? sort : "created_at";
   const sortDir = order === "asc" ? "ASC" : "DESC";
 
-  const total = db.prepare(
-    `SELECT COUNT(*) as count FROM documents d ${where}`
-  ).get(...params) as { count: number };
+  const totalRs = await db.execute({
+    sql: `SELECT COUNT(*) as count FROM documents d ${where}`,
+    args: params,
+  });
+  const totalRow = firstRow(totalRs);
 
-  const documents = db.prepare(
-    `SELECT d.* FROM documents d ${where} ORDER BY d.is_favorite DESC, d.${sortCol} ${sortDir} LIMIT ? OFFSET ?`
-  ).all(...params, limit, offset);
+  const docsRs = await db.execute({
+    sql: `SELECT d.* FROM documents d ${where} ORDER BY d.is_favorite DESC, d.${sortCol} ${sortDir} LIMIT ? OFFSET ?`,
+    args: [...params, limit, offset],
+  });
+  const documents = rowsToObjects(docsRs);
 
-  return NextResponse.json({ documents, total: total.count });
+  return NextResponse.json({ documents, total: (totalRow?.count as number) || 0 });
 }
 
 export async function POST(request: NextRequest) {
@@ -54,7 +58,7 @@ export async function POST(request: NextRequest) {
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const body = await request.json();
-  const db = getDb();
+  const db = await getDb();
   const id = uuid();
 
   let title = body.title || "";
@@ -82,11 +86,13 @@ export async function POST(request: NextRequest) {
     wordCount = countWords(content.replace(/<[^>]*>/g, ""));
   }
 
-  db.prepare(`
-    INSERT INTO documents (id, user_id, title, author, url, source, category, content, summary, cover_image, word_count, location)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(id, user.id, title, author, url, url ? "web" : "manual", category, content, summary, coverImage, wordCount, location);
+  await db.execute({
+    sql: `INSERT INTO documents (id, user_id, title, author, url, source, category, content, summary, cover_image, word_count, location)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    args: [id, user.id, title, author, url, url ? "web" : "manual", category, content, summary, coverImage, wordCount, location],
+  });
 
-  const document = db.prepare("SELECT * FROM documents WHERE id = ?").get(id);
+  const rs = await db.execute({ sql: "SELECT * FROM documents WHERE id = ?", args: [id] });
+  const document = firstRow(rs);
   return NextResponse.json({ document }, { status: 201 });
 }
